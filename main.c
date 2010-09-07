@@ -43,9 +43,7 @@ uint16_t status = 0;
 
 typedef struct seven_state_s
 {
-  uint8_t   digit;   /* Digit being processed */
   uint16_t  word;    /* Word to display */
-  uint8_t   test;
 } seven_state;
 
 /* 0 - normal display
@@ -121,7 +119,7 @@ static uint16_t bcd_inc(uint16_t x)
   return 0;
 }
 
-static void seven_set(uint8_t digit, uint8_t pattern)
+static void seven_set(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 {
   uint8_t i;
 
@@ -142,9 +140,21 @@ static void seven_set(uint8_t digit, uint8_t pattern)
 
   for(i = 0; i < 8; i ++)
   {
-    if(pattern & 1) PORTC &= ~(1 << digit);
-    pattern >>= 1;
-    _delay_us(125);
+    PORTC =
+      (PORTC | 15) &
+      ~(
+         ((p3 & 1) ? 8 : 0) |
+         ((p2 & 1) ? 4 : 0) |
+         ((p1 & 1) ? 2 : 0) |
+         ((p0 & 1) ? 1 : 0)
+       );
+
+    //_delay_us(125);
+    _delay_ms(3);
+    p3 >>= 1;
+    p2 >>= 1;
+    p1 >>= 1;
+    p0 >>= 1;
     PORTC |= 15;
 
     SEG7_PORT |= _BV(SEG7_CLK);
@@ -153,43 +163,26 @@ static void seven_set(uint8_t digit, uint8_t pattern)
   }
 }
 
-static void seven_init(seven_state *q)
+static void seven_init(volatile seven_state *q)
 {
   DDRD  |=  7 << 5;
   DDRC  |= 15;
 
   q->word    = 0x1234;
-  q->digit   = 0;
-  q->test    = 0;
 }
 
-static void seven_process(seven_state *q)
+static void seven_process(volatile seven_state *q)
 {
-  uint8_t d, p;
+  uint16_t w;
+  uint8_t p0, p1, p2, p3;
 
-  if(q->test)
-  {
-    d = q->test >> 3;
-    if(d == q->digit)
-    {
-      p = 1 << (q->test & 7);
-    }
-    else
-    {
-      p = 0;
-    }
-  }
-  else
-  {
-    d = (q->word >> (q->digit << 2)) & 15;
-    p = seven_table[d];
-  }
-  seven_set(q->digit, p);
-  q->digit ++;
-  if(q->digit == 4)
-  {
-      q->digit = 0;
-  }
+  w = q->word;
+
+  p0 = seven_table[w & 15]; w >>= 4;
+  p1 = seven_table[w & 15]; w >>= 4;
+  p2 = seven_table[w & 15]; w >>= 4;
+  p3 = seven_table[w & 15];
+  seven_set(p0, p1, p2, p3);
 }
 
 /* 32µs timer */
@@ -203,9 +196,9 @@ void timer_init(void)
 {
   /* 58kHz generator */
   TCCR1A = _BV(COM1B1) | _BV(WGM10);
-  TCCR1B = _BV(WGM13) | _BV(CS10);
-  OCR1A = 20000;
-  OCR1B = 10000;
+  TCCR1B = _BV(WGM13) | _BV(CS10) | _BV(CS12);
+  OCR1A = 200;
+  OCR1B = 100;
   TIMSK = _BV(TOIE1);
 
   DDRB |= 2;
@@ -221,6 +214,7 @@ int main(void)
     //set_sleep_mode(SLEEP_MODE_IDLE);
     //sleep_mode();
     seven_process(&seven);
+
     retard();
   }
 }
