@@ -149,6 +149,11 @@ static void seven_set(uint16_t x)
   seven.word = x;
 }
 
+static uint16_t seven_get(void)
+{
+  return seven.word;
+}
+
 static void seven_process(volatile seven_state *q)
 {
   uint16_t w;
@@ -195,12 +200,6 @@ static void seven_process(volatile seven_state *q)
   }
 }
 
-/* 32µs timer */
-ISR(SIG_OVERFLOW1)
-{
-  PORTB ^= 2;
-}
-
 void timer_init(void)
 {
   /* 58kHz generator */
@@ -226,29 +225,128 @@ uint16_t adc_get(void)
   return ADC;
 }
 
+#define KBD_DAT  2
+#define KBD_CLK  3
+#define KBD_PORT PORTD
+#define KBD_PIN  PIND
+#define KBD_DDR  DDRD
+
+uint8_t kbd_count;
+uint16_t kbd_state;
+volatile uint16_t kbd_input;
+
+void kbd_init(void)
+{
+  KBD_DDR &= ~(_BV(KBD_DAT) | _BV(KBD_CLK));
+  kbd_state = 0;
+  kbd_count = 0;
+  kbd_input = 0;
+  MCUCR |= _BV(ISC11);
+  MCUCR &= ~_BV(ISC10);
+  GICR |= _BV(INT1);
+}
+
+static inline void kbd_process(void)
+{
+  uint8_t dt;
+
+  dt = !!(KBD_PIN & _BV(KBD_DAT));
+  kbd_state <<= 1;
+  kbd_state |= dt;
+  kbd_count ++;
+  if(kbd_count == 11)
+  {
+    kbd_input = kbd_state;
+    kbd_state = 0;
+    kbd_count = 0;
+  }
+}
+
+ISR(SIG_INTERRUPT1)
+{
+  kbd_process();
+}
+
+/* 32µs timer */
+ISR(SIG_OVERFLOW1)
+{
+}
+
 int main(void)
 {
   uint32_t q_total = 0, q;
+  uint16_t display_word = 0;
   uint16_t c = 0;
+  uint16_t got_key;
+  uint16_t goal = 3000;
+  uint8_t display_mode = 0;
+  uint16_t display_count = 0;
 
   timer_init();
   seven_init(&seven);
+  kbd_init();
   adc_init();
   sei();
 
   for(;;) {
     seven_process(&seven);
-    // seven.word = bcd_inc(seven.word);
-    q  = adc_get();
-    q_total += q;
-    c ++;
-    if(c == 32)
+
+    //cli();
+    got_key = kbd_input;
+    kbd_input = 0;
+    //sei();
+    switch(got_key)
     {
-      c = 0;
-      q_total >>= 5;
-      q_total *= 9999;
-      q_total >>= 10;
-      seven_set(to_bcd(q_total));
+      case 0x2b9:
+        goal += 10;
+        display_mode = 1;
+        display_count = 100;
+        break;
+      case 0x13b:
+        goal -= 10;
+        display_mode = 1;
+        display_count = 100;
+        break;
+      default:
+        display_mode = 2;
+        display_word = got_key;
+        display_count = 200;
+        break;
+      case 0:
+        break;
+    }
+
+    // seven.word = bcd_inc(seven.word);
+    if(display_mode)
+    {
+      PORTB |= 2;
+      switch(display_mode)
+      {
+        case 1:
+          seven_set(to_bcd(goal));
+          break;
+        case 2:
+          seven_set(display_word);
+          break;
+      }
+      display_count --;
+      if(!display_count) display_mode = 0;
+    }
+    else
+    {
+      q  = adc_get();
+      q_total += q;
+      c ++;
+      if(c == 32)
+      {
+        c = 0;
+        q_total >>= 5;
+        q_total *= 9999;
+        q_total >>= 10;
+        seven_set(to_bcd(q_total));
+        q_total = 0;
+      }
+      PORTB &= ~2;
     }
 
     retard();
