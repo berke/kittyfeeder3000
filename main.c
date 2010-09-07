@@ -107,6 +107,18 @@ static inline void retard(void)
     );
 }
 
+static uint16_t to_bcd(uint16_t x)
+{
+  uint16_t r = 0;
+
+  if(x >= 10000) return 0x9999;
+  while(x >= 1000) { r += 0x1000; x -=   1000; }
+  while(x >=  100) { r += 0x0100; x -=    100; }
+  while(x >=   10) { r += 0x0010; x -=     10; }
+  r += x;
+  return r;
+}
+
 static uint16_t bcd_inc(uint16_t x)
 {
   if((x & 0x000f) < 0x0009) return x + 0x0001;
@@ -121,12 +133,34 @@ static uint16_t bcd_inc(uint16_t x)
 
 static void multi_delay(uint8_t c)
 {
-  _delay_us(125);
+  _delay_us(50);
 }
 
-static void seven_set(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
+static void seven_init(volatile seven_state *q)
 {
+  DDRD  |=  7 << 5;
+  DDRC  |= 15;
+
+  q->word    = 0x1234;
+}
+
+static void seven_set(uint16_t x)
+{
+  seven.word = x;
+}
+
+static void seven_process(volatile seven_state *q)
+{
+  uint16_t w;
+  uint8_t p0, p1, p2, p3;
   uint8_t i;
+
+  w = q->word;
+
+  p0 = seven_table[w & 15]; w >>= 4;
+  p1 = seven_table[w & 15]; w >>= 4;
+  p2 = seven_table[w & 15]; w >>= 4;
+  p3 = seven_table[w & 15];
 
   PORTC |= 15;
 
@@ -161,32 +195,9 @@ static void seven_set(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
   }
 }
 
-static void seven_init(volatile seven_state *q)
-{
-  DDRD  |=  7 << 5;
-  DDRC  |= 15;
-
-  q->word    = 0x1234;
-}
-
-static void seven_process(volatile seven_state *q)
-{
-  uint16_t w;
-  uint8_t p0, p1, p2, p3;
-
-  w = q->word;
-
-  p0 = seven_table[w & 15]; w >>= 4;
-  p1 = seven_table[w & 15]; w >>= 4;
-  p2 = seven_table[w & 15]; w >>= 4;
-  p3 = seven_table[w & 15];
-  seven_set(p0, p1, p2, p3);
-}
-
 /* 32µs timer */
 ISR(SIG_OVERFLOW1)
 {
-  seven.word = bcd_inc(seven.word);
   PORTB ^= 2;
 }
 
@@ -202,16 +213,43 @@ void timer_init(void)
   DDRB |= 2;
 }
 
+void adc_init(void)
+{
+  ADMUX = _BV(REFS1) | _BV(REFS0) | _BV(MUX0) | _BV(MUX2);
+  ADCSRA = _BV(ADEN);
+}
+
+uint16_t adc_get(void)
+{
+  ADCSRA |= _BV(ADSC);
+  do { } while(ADCSRA & _BV(ADSC));
+  return ADC;
+}
+
 int main(void)
 {
+  uint32_t q_total = 0, q;
+  uint16_t c = 0;
+
   timer_init();
   seven_init(&seven);
+  adc_init();
   sei();
 
   for(;;) {
-    //set_sleep_mode(SLEEP_MODE_IDLE);
-    //sleep_mode();
     seven_process(&seven);
+    // seven.word = bcd_inc(seven.word);
+    q  = adc_get();
+    q_total += q;
+    c ++;
+    if(c == 32)
+    {
+      c = 0;
+      q_total >>= 5;
+      q_total *= 9999;
+      q_total >>= 10;
+      seven_set(to_bcd(q_total));
+    }
 
     retard();
   }
