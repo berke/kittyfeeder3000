@@ -144,7 +144,7 @@ static void seven_set(uint8_t digit, uint8_t pattern)
   {
     if(pattern & 1) PORTC &= ~(1 << digit);
     pattern >>= 1;
-    _delay_us(10);
+    _delay_us(125);
     PORTC |= 15;
 
     SEG7_PORT |= _BV(SEG7_CLK);
@@ -195,18 +195,8 @@ static void seven_process(seven_state *q)
 /* 32µs timer */
 ISR(SIG_OVERFLOW1)
 {
-  status ++;
-  switch(status & 4095)
-  {
-    case 0:
-      break;
-    case 500:
-      seven.word = bcd_inc(seven.word);
-      PORTB ^= 2;
-      break;
-    default:
-      break;
-  }
+  seven.word = bcd_inc(seven.word);
+  PORTB ^= 2;
 }
 
 void timer_init(void)
@@ -214,8 +204,8 @@ void timer_init(void)
   /* 58kHz generator */
   TCCR1A = _BV(COM1B1) | _BV(WGM10);
   TCCR1B = _BV(WGM13) | _BV(CS10);
-  OCR1A = 69;
-  OCR1B = 34;
+  OCR1A = 20000;
+  OCR1B = 10000;
   TIMSK = _BV(TOIE1);
 
   DDRB |= 2;
