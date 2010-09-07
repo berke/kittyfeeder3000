@@ -119,6 +119,11 @@ static uint16_t bcd_inc(uint16_t x)
   return 0;
 }
 
+static void multi_delay(uint8_t c)
+{
+  _delay_us(125);
+}
+
 static void seven_set(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 {
   uint8_t i;
@@ -140,22 +145,15 @@ static void seven_set(uint8_t p0, uint8_t p1, uint8_t p2, uint8_t p3)
 
   for(i = 0; i < 8; i ++)
   {
-    PORTC =
-      (PORTC | 15) &
-      ~(
-         ((p3 & 1) ? 8 : 0) |
-         ((p2 & 1) ? 4 : 0) |
-         ((p1 & 1) ? 2 : 0) |
-         ((p0 & 1) ? 1 : 0)
-       );
+    if(p3 & 1) PORTC &= ~8; multi_delay(1); PORTC |= 8;
+    if(p2 & 1) PORTC &= ~4; multi_delay(1); PORTC |= 4;
+    if(p1 & 1) PORTC &= ~2; multi_delay(1); PORTC |= 2;
+    if(p0 & 1) PORTC &= ~1; multi_delay(1); PORTC |= 1;
 
-    //_delay_us(125);
-    _delay_ms(3);
     p3 >>= 1;
     p2 >>= 1;
     p1 >>= 1;
     p0 >>= 1;
-    PORTC |= 15;
 
     SEG7_PORT |= _BV(SEG7_CLK);
     retard();
