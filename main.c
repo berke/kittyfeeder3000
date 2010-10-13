@@ -212,6 +212,25 @@ void timer_init(void)
   DDRB |= 2;
 }
 
+void serial_init(void)
+{
+  UBRRH = 0;
+  UBRRL = 12;
+  UCSRB |= _BV(RXEN) | _BV(TXEN);
+  UCSRC = _BV(URSEL) | _BV(UCSZ0) | _BV(UCSZ1);
+}
+
+uint8_t char_of_nibble(uint8_t x)
+{
+  return x < 10 ? '0' + x : 'a' + x - 10;
+}
+
+void serial_send(uint8_t c)
+{
+  while(!(UCSRA & _BV(UDRE)));
+  UDR = c;
+}
+
 void adc_init(void)
 {
   ADMUX = _BV(REFS1) | _BV(REFS0) | _BV(MUX0) | _BV(MUX2);
@@ -284,6 +303,7 @@ int main(void)
 
   timer_init();
   seven_init(&seven);
+  serial_init();
   kbd_init();
   adc_init();
   sei();
@@ -311,6 +331,9 @@ int main(void)
         display_mode = 2;
         display_word = got_key;
         display_count = 200;
+        serial_send(char_of_nibble(got_key & 0x00f));
+        serial_send(char_of_nibble((got_key >> 4) & 0x00f));
+        serial_send(char_of_nibble((got_key >> 8) & 0x00f));
         break;
       case 0:
         break;
