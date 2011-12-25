@@ -45,6 +45,8 @@ uint16_t status = 0;
 
 volatile struct seven_state seven;
 volatile struct clock_state clock;
+struct program_state program;
+struct feeder_state feeder;
 
 void timer_init(void)
 {
@@ -63,6 +65,126 @@ void timer_init(void)
 
 	TCNT0 = 0;
         TIMSK = _BV(TOIE0);
+}
+
+#define PWM_PERIOD 10000
+#define PWM_ON 1250
+#define PWM_OFF 500
+
+void pwm_init(void)
+{
+	ICR1 = PWM_PERIOD;
+	OCR1A = PWM_OFF;
+	TCCR1A = _BV(COM1A1) | _BV(WGM11);
+	//TCCR1A = _BV(COM1A1) | _BV(COM1A0) | _BV(WGM11);
+	TCCR1B = _BV(WGM13) | _BV(CS10);
+	DDRB |= 2;
+}
+
+void pwm_control(bool state)
+{
+	OCR1A = state ? PWM_ON : PWM_OFF;
+}
+
+enum feed_state {
+	FEED_IDLE,
+	FEED_OPENING,
+	FEED_SHAKING,
+	FEED_PAUSING,
+	FEED_CLOSING
+};
+
+enum feed_event {
+	FEED_TICK,
+	FEED_KITTY
+};
+
+#define FEED_OPEN_TIME 5
+#define FEED_SHAKE_TIME 10
+#define FEED_PAUSE_TIME 3
+#define FEED_CLOSE_TIME 5
+
+struct feeder_state {
+	uint8_t state;
+	uint8_t timer;
+};
+
+#define SHAKER_PORT PORTD
+#define SHAKER_DDR DDRD
+#define SHAKER_PIN PIND
+#define SHAKER_BIT 2
+
+void shaker_init(void)
+{
+	SHAKER_PORT &= ~_BV(SHAKER_BIT);
+	SHAKER_DDR |= _BV(SHAKER_BIT);
+}
+
+void shaker_control(bool control)
+{
+	if (control)
+		SHAKER_PORT |= _BV(SHAKER_BIT);
+	else
+		SHAKER_PORT &= ~_BV(SHAKER_BIT);
+}
+
+void feeder_init(struct feeder_state *q)
+{
+	q->state = FEED_IDLE;
+	q->timer = 0;
+}
+
+void feeder_transition(struct feeder_state *q, enum feed_event e)
+{
+	switch (q->state) {
+		default:
+		case FEED_IDLE:
+			switch (e) {
+				case FEED_TICK:
+					break;
+				case FEED_KITTY:
+					pwm_control(true);
+					q->timer = 0;
+					q->state = FEED_OPENING;
+					break;
+			}
+			break;
+
+		case FEED_OPENING:
+			q->timer ++;
+			if (q->timer == FEED_OPEN_TIME) {
+				shaker_control(true);
+				q->timer = 0;
+				q->state = FEED_SHAKING;
+			}
+			break;
+
+		case FEED_SHAKING:
+			q->timer ++;
+			if (q->timer == FEED_SHAKE_TIME) {
+				shaker_control(false);
+				q->timer = 0;
+				q->state = FEED_PAUSING;
+			}
+			break;
+
+		case FEED_PAUSING:
+			q->timer ++;
+			if (q->timer == FEED_PAUSE_TIME) {
+				pwm_control(false);
+				q->timer = 0;
+				q->state = FEED_CLOSING;
+			}
+			break;
+
+		case FEED_CLOSING:
+			q->timer ++;
+			if (q->timer == FEED_CLOSE_TIME) {
+				q->timer = 0;
+				q->state = FEED_IDLE;
+			}
+			break;
+	}
 }
 
 void serial_init(void)
@@ -192,6 +314,7 @@ uint32_t clock_get_ticks(volatile struct clock_state *ck)
 ISR(SIG_OVERFLOW0)
 {
 	clock_tick(&clock);
+	feeder_transition(&feeder, FEED_TICK);
 }
 
 #define BUTTON_PORT PORTC
@@ -261,10 +384,13 @@ static struct button_state button;
 #define MAIN_PROG_PATTERN PAT(E|D|F|G|A, G|A, G|A|C|B, E|F|D|G|C|B|P)
 #define MAIN_CANCEL_PATTERN PAT(E|F|A|B, E|D|G|A|C|B, G|A|C, G|A|B|P)
 
+#define MAIN_FEED_TIME 5
+
 enum {
 	MAIN_SELM_HOURS,
 	MAIN_SELM_MINUTES,
 	MAIN_SELM_PROG,
+	MAIN_SELM_FEED,
 	MAIN_SELM_CANCEL,
 	MAIN_SELM_COUNT
 };
@@ -282,9 +408,19 @@ enum {
 
 #define PROG_NUM_SLOTS 48
 
+#define PROG_DEFAULT_SLOT_1 ((6 * 60 + 30) / 30)
+#define PROG_DEFAULT_SLOT_2 ((12 * 60 + 30) / 30)
+#define PROG_DEFAULT_SLOT_3 ((16 * 60 + 30) / 30)
+#define PROG_DEFAULT_SLOT_4 ((21 * 60 + 30) / 30)
+
 struct program_state {
 	uint8_t slots[PROG_NUM_SLOTS / 8];
 };
+
+void program_toggle_slot(struct program_state *p, uint8_t slot)
+{
+	p->slots[slot >> 3] ^= 1 << (slot & 7);
+}
 
 void program_init(struct program_state *p)
 {
@@ -292,6 +428,11 @@ void program_init(struct program_state *p)
 
 	for (i = 0; i < PROG_NUM_SLOTS / 8; i ++)
 		p->slots[i] = 0;
+
+	program_toggle_slot(p, PROG_DEFAULT_SLOT_1); 
+	program_toggle_slot(p, PROG_DEFAULT_SLOT_2); 
+	program_toggle_slot(p, PROG_DEFAULT_SLOT_3); 
+	program_toggle_slot(p, PROG_DEFAULT_SLOT_4); 
 }
 
 uint16_t program_get_slot(struct program_state *p, uint8_t slot, bool *active)
@@ -303,13 +444,6 @@ uint16_t program_get_slot(struct program_state *p, uint8_t slot, bool *active)
 
 	return clock_seconds_to_hhmm_bcd(t_s);
 }
-
-void program_toggle_slot(struct program_state *p, uint8_t slot)
-{
-	p->slots[slot >> 3] ^= 1 << (slot & 7);
-}
-
-struct program_state program;
 
 int main(void)
 {
@@ -325,7 +459,10 @@ int main(void)
 	bool active;
 	
         timer_init();
+	pwm_init();
+	shaker_init();
         seven_init(&seven);
+	feeder_init(&feeder);
         serial_init();
         adc_init();
 	clock_init(&clock, 12, 34, 56);
@@ -394,6 +531,17 @@ int main(void)
 							state = MAIN_SET_PROG;
 						break;
 
+					case MAIN_SELM_FEED:
+						seven_set_pattern(&seven,
+							MAIN_FEED_PATTERN);
+						if (but_prs) {
+							feeder_transition(
+								&feeder,
+								FEED_KITTY);
+							state = MAIN_DISP_TIME;
+						}
+						break;
+
 					default:
 					case MAIN_SELM_CANCEL:
 						seven_set_pattern(&seven,
@@ -451,7 +599,6 @@ int main(void)
 						program_toggle_slot(&program,
 								slot);
 				}
-
 				break;
 
 			default:
