@@ -445,6 +445,8 @@ uint16_t program_get_slot(struct program_state *p, uint8_t slot, bool *active)
 	return clock_seconds_to_hhmm_bcd(t_s);
 }
 
+#define KR_PERIOD 5
+
 int main(void)
 {
 	bool last_prs, prs = false;
@@ -457,6 +459,10 @@ int main(void)
 	uint32_t e;
 	uint8_t slot;
 	bool active;
+	uint8_t kr_counter = 0;
+	uint8_t kr_phase = 0;
+	bool kr_up = true;
+	uint32_t pat;
 	
         timer_init();
 	pwm_init();
@@ -500,11 +506,26 @@ int main(void)
 				}
 				break;
 			case MAIN_DISP_TIME:
-				seven_set(&seven, clock_encode(&clock));
-				if (!last_prs && prs) {
-					select_state = MAIN_SELM_HOURS;
-					state = MAIN_SELM;
+				kr_counter ++;
+				if (kr_counter == KR_PERIOD) {
+					kr_counter = 0;
+					if (kr_up) {
+						kr_phase ++;
+						if (kr_phase == 4) {
+							kr_phase = 3;
+							kr_up = false;
+						}
+					} else {
+						if (kr_phase)
+							kr_phase --;
+						else kr_up = true;
+					}
 				}
+				pat = seven_encode(clock_encode(&clock));
+				pat |= (uint32_t) SS_P << (kr_phase << 3);
+				seven_set_pattern(&seven, pat);
+				if (!last_prs && prs)
+					state = MAIN_SELM;
 				break;
 
 			case MAIN_SELM:
