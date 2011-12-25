@@ -13,30 +13,17 @@
 /* 0 - normal display
  * 1 to 32 : test mode, show segment i */
 
-#define A   1
-#define B   2
-#define C   4
-#define P   8
-#define D  16
-#define E  32
-#define F  64
-#define G 128
+#define A SS_A
+#define B SS_B
+#define C SS_C
+#define P SS_P
+#define D SS_D
+#define E SS_E
+#define F SS_F
+#define G SS_G
 
 static const uint8_t seven_table[] =
 {
-        /* 
-         *  -E-
-         * |   |
-         * F   D
-         * |   |
-         *  -G-
-         * |   |
-         * A   C
-         * |   |
-         *  -B-  (P)
-         *
-         */
-
         /* 0 */ A+B+C+D+E+F    ,
         /* 1 */     C+D        ,
         /* 2 */ A+B  +D+E  +G  ,
@@ -72,6 +59,7 @@ uint16_t seven_to_bcd(uint16_t x)
         return r;
 }
 
+__attribute__((unused))
 static uint16_t bcd_inc(uint16_t x)
 {
         if((x & 0x000f) < 0x0009) return x + 0x0001;
@@ -84,9 +72,9 @@ static uint16_t bcd_inc(uint16_t x)
         return 0;
 }
 
-static void multi_delay(uint8_t c)
+static void seven_multi_delay(uint8_t c)
 {
-        _delay_us(50);
+        _delay_us(500);
 }
 
 void seven_init(volatile struct seven_state *q)
@@ -98,9 +86,26 @@ void seven_init(volatile struct seven_state *q)
         q->word    = 0x1234;
 }
 
+uint32_t seven_encode(uint16_t x)
+{
+        return
+                ((uint32_t) seven_table[x & 15]) |
+                (((uint32_t) seven_table[(x >> 4) & 15]) << 8) |
+                (((uint32_t) seven_table[(x >> 8) & 15]) << 16) |
+                (((uint32_t) seven_table[(x >> 12) & 15]) << 24);
+}
+
+void seven_set_pattern(volatile struct seven_state *q, uint32_t pattern)
+{
+        q->pattern[3] = (pattern >> 24) & 255;
+        q->pattern[2] = (pattern >> 16) & 255;
+        q->pattern[1] = (pattern >>  8) & 255;
+        q->pattern[0] = pattern & 255;
+}
+
 void seven_set(volatile struct seven_state *q, uint16_t x)
 {
-        q->word = x;
+        seven_set_pattern(q, seven_encode(x));
 }
 
 uint16_t seven_get(volatile struct seven_state *q)
@@ -110,16 +115,13 @@ uint16_t seven_get(volatile struct seven_state *q)
 
 void seven_process(volatile struct seven_state *q)
 {
-        uint16_t w;
         uint8_t p0, p1, p2, p3;
         uint8_t i;
 
-        w = q->word;
-
-        p0 = seven_table[w & 15]; w >>= 4;
-        p1 = seven_table[w & 15]; w >>= 4;
-        p2 = seven_table[w & 15]; w >>= 4;
-        p3 = seven_table[w & 15];
+        p0 = q->pattern[0];
+        p1 = q->pattern[1];
+        p2 = q->pattern[2];
+        p3 = q->pattern[3];
 
         SEVEN_DGT_PORT |= SEVEN_DGT_0 | SEVEN_DGT_1 | SEVEN_DGT_2 | SEVEN_DGT_3;
 
@@ -139,19 +141,19 @@ void seven_process(volatile struct seven_state *q)
         for(i = 0; i < 8; i ++)
         {
                 if(p3 & 1) SEVEN_DGT_PORT &= ~SEVEN_DGT_3;
-                multi_delay(1);
+                seven_multi_delay(1);
                 SEVEN_DGT_PORT |= SEVEN_DGT_3;
 
                 if(p2 & 1) SEVEN_DGT_PORT &= ~SEVEN_DGT_2;
-                multi_delay(1);
+                seven_multi_delay(1);
                 SEVEN_DGT_PORT |= SEVEN_DGT_2;
 
                 if(p1 & 1) SEVEN_DGT_PORT &= ~SEVEN_DGT_1;
-                multi_delay(1);
+                seven_multi_delay(1);
                 SEVEN_DGT_PORT |= SEVEN_DGT_1;
 
                 if(p0 & 1) SEVEN_DGT_PORT &= ~SEVEN_DGT_0;
-                multi_delay(1);
+                seven_multi_delay(1);
                 SEVEN_DGT_PORT |= SEVEN_DGT_0;
 
                 p3 >>= 1;
