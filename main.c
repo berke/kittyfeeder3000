@@ -128,25 +128,42 @@ void clock_set_h(volatile struct clock_state *ck, uint8_t h)
 	cli();
 	minutes = ck->t_s / 60;
 	m = minutes % 60;
-	ck->t_s = 60 * (h * 60 + m);
+	ck->t_s = 60 * ((uint32_t) h * 60 + m);
+	ck->t_s_last = 0;
 	sei();
+}
+
+void clock_set_m(volatile struct clock_state *ck, uint8_t m)
+{
+	uint8_t h;
+	uint16_t minutes;
+
+	cli();
+	minutes = ck->t_s / 60;
+	h = minutes / 60;
+	ck->t_s = 60 * ((uint32_t) h * 60 + m);
+	ck->t_s_last = 0;
+	sei();
+}
+
+uint16_t clock_seconds_to_hhmm_bcd(uint32_t t)
+{
+	uint16_t minutes;
+	uint8_t h, m;
+
+	minutes = t / 60;
+	m = minutes % 60;
+	h = (minutes / 60) % 24;
+
+	return seven_to_bcd((h * 100) + m);
 }
 
 uint16_t clock_encode(volatile struct clock_state *ck)
 {
-	uint8_t h, m;
-	uint16_t minutes;
-
-	if (ck->t_s == ck->t_s_last)
-		return ck->encoded;
-
-	ck->t_s_last = ck->t_s;
-
-	minutes = ck->t_s / 60;
-	m = minutes % 60;
-	h = (minutes / 60) % 24;
-
-	ck->encoded = seven_to_bcd((h * 100) + m);
+	if (ck->t_s != ck->t_s_last) {
+		ck->t_s_last = ck->t_s;
+		ck->encoded = clock_seconds_to_hhmm_bcd(ck->t_s);
+	}
 
 	return ck->encoded;
 }
@@ -241,12 +258,13 @@ static struct button_state button;
 #define MAIN_MIN_PATTERN PAT(E|F|D|A|C, A, G|A|C|P, 0)
 #define MAIN_HOUR_PATTERN PAT(F|D|G|A|C, G|A|P, 0, 0)
 #define MAIN_FEED_PATTERN PAT(E|F|G|A, E|F|D|G|A|B, E|F|D|G|A|B, D|G|A|C|B)
+#define MAIN_PROG_PATTERN PAT(E|D|F|G|A, G|A, G|A|C|B, E|F|D|G|C|B|P)
 #define MAIN_CANCEL_PATTERN PAT(E|F|A|B, E|D|G|A|C|B, G|A|C, G|A|B|P)
 
 enum {
 	MAIN_SELM_HOURS,
 	MAIN_SELM_MINUTES,
-	MAIN_SELM_FEED,
+	MAIN_SELM_PROG,
 	MAIN_SELM_CANCEL,
 	MAIN_SELM_COUNT
 };
@@ -259,8 +277,39 @@ enum {
 	MAIN_SELM,
 	MAIN_SET_H,
 	MAIN_SET_M,
-	MAIN_SET_FEED,
+	MAIN_SET_PROG,
 };
+
+#define PROG_NUM_SLOTS 48
+
+struct program_state {
+	uint8_t slots[PROG_NUM_SLOTS / 8];
+};
+
+void program_init(struct program_state *p)
+{
+	uint8_t i;
+
+	for (i = 0; i < PROG_NUM_SLOTS / 8; i ++)
+		p->slots[i] = 0;
+}
+
+uint16_t program_get_slot(struct program_state *p, uint8_t slot, bool *active)
+{
+	uint32_t t_s;
+
+	t_s = (slot * 86400) / PROG_NUM_SLOTS;
+	*active = (p->slots[slot >> 3] & (1 << (slot & 7))) != 0;
+
+	return clock_seconds_to_hhmm_bcd(t_s);
+}
+
+void program_toggle_slot(struct program_state *p, uint8_t slot)
+{
+	p->slots[slot >> 3] ^= 1 << (slot & 7);
+}
+
+struct program_state program;
 
 int main(void)
 {
@@ -270,13 +319,18 @@ int main(void)
 	uint8_t select_state;
 	uint32_t t, t_start = 0;
 	uint8_t h, m;
+	uint16_t h_bcd, m_bcd, hhmm_bcd;
+	uint32_t e;
+	uint8_t slot;
+	bool active;
 	
         timer_init();
         seven_init(&seven);
         serial_init();
         adc_init();
-	clock_init(&clock, 8, 39, 0);
+	clock_init(&clock, 12, 34, 56);
 	button_init(&button);
+	program_init(&program);
         sei();
 
         for(;;) {
@@ -333,11 +387,11 @@ int main(void)
 							state = MAIN_SET_H;
 						break;
 
-					case MAIN_SELM_FEED:
+					case MAIN_SELM_PROG:
 						seven_set_pattern(&seven,
-							MAIN_FEED_PATTERN);
+							MAIN_PROG_PATTERN);
 						if (but_prs)
-							state = MAIN_SET_FEED;
+							state = MAIN_SET_PROG;
 						break;
 
 					default:
@@ -352,11 +406,52 @@ int main(void)
 
 			case MAIN_SET_H:
 				h = adc_get_choice(24);
-				seven_set(&seven, seven_to_bcd(h));
+				h_bcd = seven_to_bcd(h);
+				m_bcd = clock_encode(&clock) & 0x00ff;
+				e = seven_encode((h_bcd << 8) | m_bcd);
+				if (t & 1) e &= 0x0000ffff;
+				seven_set_pattern(&seven, e);
 				if (but_prs) {
 					clock_set_h(&clock, h);
 					state = MAIN_DISP_TIME;
 				}
+				break;
+
+			case MAIN_SET_M:
+				m = adc_get_choice(60);
+				m_bcd = seven_to_bcd(m);
+				h_bcd = clock_encode(&clock)  >> 8;
+				e = seven_encode((h_bcd << 8) | m_bcd);
+				if (t & 1) e &= 0xffff0000;
+				seven_set_pattern(&seven, e);
+				if (but_prs) {
+					clock_set_m(&clock, m);
+					state = MAIN_DISP_TIME;
+				}
+				break;
+
+			case MAIN_SET_PROG:
+				slot = adc_get_choice(PROG_NUM_SLOTS + 1);
+
+				if (slot == PROG_NUM_SLOTS) {
+					seven_set_pattern(&seven,
+							MAIN_CANCEL_PATTERN);
+					if (but_prs)
+						state = MAIN_DISP_TIME;
+				} else {
+					hhmm_bcd = program_get_slot(&program,
+							slot,
+							&active);
+					e = seven_encode(hhmm_bcd);
+					if (active)
+						e |= PAT(P,P,P,P);
+					seven_set_pattern(&seven, e);
+
+					if (but_prs)
+						program_toggle_slot(&program,
+								slot);
+				}
+
 				break;
 
 			default:
