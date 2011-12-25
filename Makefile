@@ -3,7 +3,7 @@ MCU = atmega8
 #MCU = at90s1200
 FORMAT = ihex
 TARGET = main
-SRC = main.c
+SRC = main.c seven.c
 ASRC = 
 
 # Optimization level, can be [0, 1, 2, 3, s]. 
