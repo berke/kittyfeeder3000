@@ -1,11 +1,7 @@
 /* KittyFeeder 3000 */
 
-#define FAST_DEBUG 0
-
-#define F_CPU 1000000
-
 const char copyright[] =
-"Copyright (C)2010 Oguz Berke Antoine DURAK.  All rights reserved.";
+	"Copyright (C)2010 Oguz Berke Antoine DURAK.  All rights reserved.";
 
 #include <string.h>
 #include <stdbool.h>
@@ -17,6 +13,7 @@ const char copyright[] =
 #include <avr/pgmspace.h>
 
 #include "seven.h"
+#include "config.h"
 
 #define CHECK 1
 #if CHECK
@@ -24,10 +21,6 @@ const char copyright[] =
 #else
 #define CK(x,y,z)
 #endif
-
-#define LED1_DDR DDRC
-#define LED1_PORT PORTC
-#define LED1_BIT 5
 
 struct clock_state {
 	uint32_t t_s;
@@ -50,33 +43,20 @@ struct feeder_state feeder;
 
 void timer_init(void)
 {
-        /* 58kHz generator */
-#if 0
-        TCCR1A = _BV(COM1B1) | _BV(WGM10);
-        TCCR1B = _BV(WGM13) | _BV(CS10) | _BV(CS12);
-        OCR1A = 2;
-        OCR1B = 1;
-        TIMSK = _BV(TOIE1);
+#if CLOCK_ACCELERATED
+	TCCR0 = _BV(CS01) | _BV(CS00);
+#else
+	TCCR0 = _BV(CS02) | _BV(CS00);
 #endif
-	if (false)
-        	TCCR0 = _BV(CS00);
-	else
-		TCCR0 = _BV(CS02) | _BV(CS00);
-
 	TCNT0 = 0;
         TIMSK = _BV(TOIE0);
 }
-
-#define PWM_PERIOD 10000
-#define PWM_ON 1250
-#define PWM_OFF 500
 
 void pwm_init(void)
 {
 	ICR1 = PWM_PERIOD;
 	OCR1A = PWM_OFF;
 	TCCR1A = _BV(COM1A1) | _BV(WGM11);
-	//TCCR1A = _BV(COM1A1) | _BV(COM1A0) | _BV(WGM11);
 	TCCR1B = _BV(WGM13) | _BV(CS10);
 	DDRB |= 2;
 }
@@ -99,20 +79,11 @@ enum feed_event {
 	FEED_KITTY
 };
 
-#define FEED_OPEN_TIME 5
-#define FEED_SHAKE_TIME 10
-#define FEED_PAUSE_TIME 3
-#define FEED_CLOSE_TIME 5
-
 struct feeder_state {
 	uint8_t state;
-	uint8_t timer;
+	uint16_t timer;
+	uint16_t shake_time;
 };
-
-#define SHAKER_PORT PORTD
-#define SHAKER_DDR DDRD
-#define SHAKER_PIN PIND
-#define SHAKER_BIT 2
 
 void shaker_init(void)
 {
@@ -131,10 +102,23 @@ void shaker_control(bool control)
 void feeder_init(struct feeder_state *q)
 {
 	q->state = FEED_IDLE;
+	q->shake_time = FEED_SHAKE_TIME;
 	q->timer = 0;
 }
 
-void feeder_transition(struct feeder_state *q, enum feed_event e)
+void feeder_set_qty(struct feeder_state *q, uint16_t qty)
+{
+	cli();
+	q->shake_time = qty;
+	sei();
+}
+
+uint8_t feeder_get_state(struct feeder_state *q)
+{
+	return q->state;
+}
+
+uint8_t feeder_transition(struct feeder_state *q, enum feed_event e)
 {
 	switch (q->state) {
 		default:
@@ -161,7 +145,7 @@ void feeder_transition(struct feeder_state *q, enum feed_event e)
 
 		case FEED_SHAKING:
 			q->timer ++;
-			if (q->timer == FEED_SHAKE_TIME) {
+			if (q->timer >= q->shake_time) {
 				shaker_control(false);
 				q->timer = 0;
 				q->state = FEED_PAUSING;
@@ -185,6 +169,8 @@ void feeder_transition(struct feeder_state *q, enum feed_event e)
 			}
 			break;
 	}
+
+	return q->state;
 }
 
 void serial_init(void)
@@ -206,8 +192,6 @@ void serial_send(uint8_t c)
         UDR = c;
 }
 
-#define ADC_BITS 10
-
 void adc_init(void)
 {
         ADMUX = _BV(REFS0) | _BV(MUX0) | _BV(MUX2);
@@ -221,22 +205,35 @@ uint16_t adc_get(void)
         return ADC;
 }
 
-uint16_t adc_get_choice(uint16_t n)
+uint32_t uint32_t_d(uint32_t x, uint32_t y)
 {
-	uint16_t pot;
-
-	pot = adc_get();
-	pot = (pot * n) >> ADC_BITS;
-	if (pot >= n) pot = n - 1;
-	return pot;
+	return x < y ? y - x : x - y;
 }
 
-#define CLOCK_PERIOD_US 262144
+uint16_t adc_get_choice(uint16_t n)
+{
+	uint32_t pot;
+	static uint32_t pot_last = 0;
+	uint32_t middle, middle_last;
+	uint32_t i, i_last;
+
+	pot = adc_get();
+	i = (pot * n) >> ADC_BITS;
+	if (i >= n) i = n - 1;
+	middle = (((2 * i + 1) << ADC_BITS) / n) >> 1;
+
+	i_last = (pot_last * n) >> ADC_BITS;
+	if (i_last >= n) i_last = n - 1;
+	middle_last = (((2 * i_last + 1) << ADC_BITS) / n) >> 1;
+	return uint32_t_d(pot, middle_last) < uint32_t_d(pot, middle) ?
+		i_last : i;
+}
 
 void clock_init(volatile struct clock_state *ck,
 		uint8_t hour, uint8_t min, uint8_t sec)
 {
-	ck->t_s = sec + 60 * (min + 60 * hour);
+	ck->t_s = (uint32_t) sec +
+		60UL * ((uint32_t) min + 60UL * (uint32_t) hour);
 	ck->t_s_last = 0;
 	ck->t_us = 0;
 	ck->ticks = 0;
@@ -310,20 +307,22 @@ uint32_t clock_get_ticks(volatile struct clock_state *ck)
 	return t;
 }
 
+uint32_t clock_get_seconds(volatile struct clock_state *ck)
+{
+	uint32_t t;
+
+	cli();
+	t = ck->t_s;
+	sei();
+	return t;
+}
+
 /* 32µs timer */
 ISR(SIG_OVERFLOW0)
 {
 	clock_tick(&clock);
 	feeder_transition(&feeder, FEED_TICK);
 }
-
-#define BUTTON_PORT PORTC
-#define BUTTON_DDR DDRC
-#define BUTTON_PIN PINC
-#define BUTTON_BIT 4
-#define BUTTON_LO_THRESHOLD 2
-#define BUTTON_HI_THRESHOLD 6
-#define BUTTON_LIMIT 8
 
 struct button_state {
 	bool state;
@@ -360,36 +359,11 @@ bool button_tick(struct button_state *q)
 
 static struct button_state button;
 
-#define A SS_A
-#define B SS_B
-#define C SS_C
-#define P SS_P
-#define D SS_D
-#define E SS_E
-#define F SS_F
-#define G SS_G
-
-#define PAT(a,b,c,d) ((((uint32_t) a) << 24) | (((uint32_t) b) << 16) \
-		| (((uint32_t) c) << 8) | ((uint32_t) d))
-
-#define MAIN_BANNER_1_TIME 2
-#define MAIN_BANNER_1_PATTERN PAT(G|A|B, E|D|G|A|C|B, F|G|A|B, 0)
-#define MAIN_BANNER_2_TIME 2
-#define MAIN_BANNER_2_PATTERN PAT(E|F|G|A, E|D|F|G|A|B, E|D|F|G|A|B, D|G|A|C|B)
-#define MAIN_BANNER_3_TIME 2
-
-#define MAIN_MIN_PATTERN PAT(E|F|D|A|C, A, G|A|C|P, 0)
-#define MAIN_HOUR_PATTERN PAT(F|D|G|A|C, G|A|P, 0, 0)
-#define MAIN_FEED_PATTERN PAT(E|F|G|A, E|F|D|G|A|B, E|F|D|G|A|B, D|G|A|C|B)
-#define MAIN_PROG_PATTERN PAT(E|D|F|G|A, G|A, G|A|C|B, E|F|D|G|C|B|P)
-#define MAIN_CANCEL_PATTERN PAT(E|F|A|B, E|D|G|A|C|B, G|A|C, G|A|B|P)
-
-#define MAIN_FEED_TIME 5
-
 enum {
 	MAIN_SELM_HOURS,
 	MAIN_SELM_MINUTES,
 	MAIN_SELM_PROG,
+	MAIN_SELM_QTY,
 	MAIN_SELM_FEED,
 	MAIN_SELM_CANCEL,
 	MAIN_SELM_COUNT
@@ -400,18 +374,13 @@ enum {
 	MAIN_BANNER_2,
 	MAIN_BANNER_3,
 	MAIN_DISP_TIME,
+	MAIN_FEED,
 	MAIN_SELM,
 	MAIN_SET_H,
 	MAIN_SET_M,
 	MAIN_SET_PROG,
+	MAIN_SET_QTY,
 };
-
-#define PROG_NUM_SLOTS 48
-
-#define PROG_DEFAULT_SLOT_1 ((6 * 60 + 30) / 30)
-#define PROG_DEFAULT_SLOT_2 ((12 * 60 + 30) / 30)
-#define PROG_DEFAULT_SLOT_3 ((16 * 60 + 30) / 30)
-#define PROG_DEFAULT_SLOT_4 ((21 * 60 + 30) / 30)
 
 struct program_state {
 	uint8_t slots[PROG_NUM_SLOTS / 8];
@@ -439,13 +408,21 @@ uint16_t program_get_slot(struct program_state *p, uint8_t slot, bool *active)
 {
 	uint32_t t_s;
 
-	t_s = (slot * 86400) / PROG_NUM_SLOTS;
 	*active = (p->slots[slot >> 3] & (1 << (slot & 7))) != 0;
+	t_s = (uint32_t) slot * PROG_SEC_PER_SLOT;
 
 	return clock_seconds_to_hhmm_bcd(t_s);
 }
 
-#define KR_PERIOD 5
+bool program_check(struct program_state *p, uint32_t t_s)
+{
+	uint8_t slot = (((uint32_t) t_s) % 86400UL) / PROG_SEC_PER_SLOT;
+	bool active;
+	uint16_t hhmm;
+
+	hhmm = program_get_slot(p, slot, &active);
+	return active;
+}
 
 int main(void)
 {
@@ -459,10 +436,13 @@ int main(void)
 	uint32_t e;
 	uint8_t slot;
 	bool active;
+	bool p_act = false, p_act_last;
+	uint8_t f_s;
 	uint8_t kr_counter = 0;
 	uint8_t kr_phase = 0;
 	bool kr_up = true;
 	uint32_t pat;
+	uint16_t q;
 	
         timer_init();
 	pwm_init();
@@ -471,7 +451,7 @@ int main(void)
 	feeder_init(&feeder);
         serial_init();
         adc_init();
-	clock_init(&clock, 12, 34, 56);
+	clock_init(&clock, 12, 24, 56);
 	button_init(&button);
 	program_init(&program);
         sei();
@@ -482,6 +462,9 @@ int main(void)
 		prs = button_tick(&button);
 		but_prs = !last_prs && prs;
 
+		p_act_last = p_act;
+		p_act = program_check(&program, clock_get_seconds(&clock));
+
 		switch (state) {
 			case MAIN_BANNER_1:
 				seven_set_pattern(&seven,
@@ -491,6 +474,7 @@ int main(void)
 					state = MAIN_BANNER_2;
 				}
 				break;
+
 			case MAIN_BANNER_2:
 				seven_set_pattern(&seven,
 						MAIN_BANNER_2_PATTERN);
@@ -499,13 +483,25 @@ int main(void)
 					state = MAIN_BANNER_3;
 				}
 				break;
+
 			case MAIN_BANNER_3:
 				seven_set(&seven, 0x3000);
 				if (t > t_start + MAIN_BANNER_3_TIME) {
 					state = MAIN_DISP_TIME;
 				}
 				break;
+
 			case MAIN_DISP_TIME:
+				pat = seven_encode(clock_encode(&clock));
+
+				if (!p_act_last && p_act) {
+					cli();
+					f_s = feeder_transition(&feeder,
+							FEED_KITTY);
+					sei();
+					state = MAIN_FEED;
+				}
+
 				kr_counter ++;
 				if (kr_counter == KR_PERIOD) {
 					kr_counter = 0;
@@ -521,11 +517,20 @@ int main(void)
 						else kr_up = true;
 					}
 				}
-				pat = seven_encode(clock_encode(&clock));
 				pat |= (uint32_t) SS_P << (kr_phase << 3);
 				seven_set_pattern(&seven, pat);
 				if (!last_prs && prs)
 					state = MAIN_SELM;
+				break;
+
+			case MAIN_FEED:
+				f_s = feeder_get_state(&feeder);
+				if (f_s == FEED_IDLE) {
+					state = MAIN_DISP_TIME;
+				} else {
+					seven_set_pattern(&seven,
+							MAIN_FEED_PATTERN);
+				}
 				break;
 
 			case MAIN_SELM:
@@ -550,6 +555,14 @@ int main(void)
 							MAIN_PROG_PATTERN);
 						if (but_prs)
 							state = MAIN_SET_PROG;
+						break;
+
+					case MAIN_SELM_QTY:
+						seven_set_pattern(&seven,
+							MAIN_QTY_PATTERN);
+						if (but_prs) {
+							state = MAIN_SET_QTY;
+						}
 						break;
 
 					case MAIN_SELM_FEED:
@@ -599,6 +612,15 @@ int main(void)
 				}
 				break;
 
+			case MAIN_SET_QTY:
+				q = adc_get_choice(FEED_MAX_QTY);
+				seven_set(&seven, seven_to_bcd(q));
+				if (but_prs) {
+					feeder_set_qty(&feeder, q);
+					state = MAIN_DISP_TIME;
+				}
+				break;
+
 			case MAIN_SET_PROG:
 				slot = adc_get_choice(PROG_NUM_SLOTS + 1);
 
@@ -609,8 +631,7 @@ int main(void)
 						state = MAIN_DISP_TIME;
 				} else {
 					hhmm_bcd = program_get_slot(&program,
-							slot,
-							&active);
+							slot, &active);
 					e = seven_encode(hhmm_bcd);
 					if (active)
 						e |= PAT(P,P,P,P);
